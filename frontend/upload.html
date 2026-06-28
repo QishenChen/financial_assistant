@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Upload Documents — Financial Document Intelligence</title>
+  <link rel="stylesheet" href="/frontend/upload.css">
+</head>
+<body>
+  <div class="upload-container">
+    <div class="upload-card">
+      <h1>📁 Upload Financial Documents</h1>
+      <p class="subtitle">Upload PDF or HTML files. After submission you will be taken to the dialogue page.</p>
+
+      <div class="drop-zone" id="dropZone">
+        <div class="drop-icon">⬆️</div>
+        <p>Drag & drop files here or click to browse</p>
+        <input type="file" id="fileInput" multiple accept=".pdf,.html">
+      </div>
+
+      <div class="file-list" id="fileList">
+        <p class="empty">No files selected</p>
+      </div>
+
+      <div class="actions">
+        <button id="submitBtn" class="btn-primary" disabled>Submit</button>
+        <a href="/" class="btn-secondary">Skip to Dialogue</a>
+      </div>
+
+      <div class="status" id="status"></div>
+    </div>
+  </div>
+
+  <script src="/frontend/upload.js"></script>
+</body>
+</html>

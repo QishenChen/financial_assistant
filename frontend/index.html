@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Financial Document Intelligence</title>
+  <link rel="stylesheet" href="/frontend/style.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Left: File Panel -->
+    <aside class="panel panel-left" id="filePanel">
+      <div class="panel-header">
+        <h2>📁 Documents</h2>
+        <div class="panel-actions">
+          <a href="/upload" id="uploadFiles" title="Upload documents">⬆️</a>
+          <button id="refreshFiles" title="Refresh file list">↻</button>
+        </div>
+      </div>
+      <div class="panel-content" id="fileList">
+        <p class="loading">Loading documents...</p>
+      </div>
+    </aside>
+
+    <!-- Resizer -->
+    <div class="resizer" id="resizerLeft"></div>
+
+    <!-- Middle: Chat + Report -->
+    <main class="panel panel-middle" id="mainPanel">
+      <div class="chat-history" id="chatHistory">
+        <div class="welcome-message">
+          <h1>📊 Financial Document Intelligence</h1>
+          <p>Ask questions about financial documents. The system will extract, analyze, and synthesize answers.</p>
+          <div class="sample-queries">
+            <span class="sample" data-query="分析招商银行坏账以及信用风险，收集详细数据">分析招商银行坏账及信用风险</span>
+            <span class="sample" data-query="Compare R&D spending of BYD vs CATL">Compare BYD vs CATL R&D</span>
+            <span class="sample" data-query="中国建筑有哪些施工项目城市？">中国建筑施工项目城市</span>
+          </div>
+        </div>
+      </div>
+      <div class="chat-input-area">
+        <input type="text" id="queryInput" placeholder="Ask a question about financial documents..." autofocus>
+        <button id="sendBtn">Send</button>
+        <button id="stopBtn" style="display:none">Stop</button>
+      </div>
+    </main>
+
+    <!-- Resizer -->
+    <div class="resizer" id="resizerRight"></div>
+
+    <!-- Right: PDF Viewer -->
+    <aside class="panel panel-right" id="pdfPanel">
+      <div class="panel-header">
+        <h2>📄 PDF Viewer</h2>
+        <span id="pdfPageInfo" class="page-info"></span>
+      </div>
+      <div class="panel-content" id="pdfContainer">
+        <p class="loading" id="pdfPlaceholder">Select a reference link to view the source PDF here.</p>
+        <canvas id="pdfCanvas"></canvas>
+      </div>
+      <div class="pdf-controls" id="pdfControls" style="display:none">
+        <button id="pdfPrev">◀ Prev</button>
+        <span id="pdfPageNum">Page 1</span>
+        <button id="pdfNext">Next ▶</button>
+      </div>
+    </aside>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="/frontend/app.js"></script>
+</body>
+</html>
