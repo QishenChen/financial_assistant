@@ -5,6 +5,7 @@ Full implementation extracted from Retriever.get_section.
 import os
 
 from agent.tools._loader import get_indices
+from agent.tools._shared import resolve_extracted_path
 from agent.tools.get_doc_info import resolve_doc
 from agent.tools.search_tables import get_tables_under
 
@@ -47,7 +48,9 @@ def get_section(doc: str, heading_path):
     # Prefer the heading with the largest content span (skip TOC entries with ~1-5 lines)
     target = max(candidates, key=lambda h: h["line_end"] - h["line_start"])
 
-    filepath = os.path.join("public_dataset_upload/extracted", rel_path)
+    filepath = resolve_extracted_path(rel_path)
+    if not os.path.exists(filepath):
+        return None
     with open(filepath, "r", encoding="utf-8") as f:
         lines = f.readlines()
     content = "".join(lines[target["line_start"]:target["line_end"]])

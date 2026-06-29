@@ -5,7 +5,7 @@ Full implementation extracted from Retriever.search_section_text.
 import os
 
 from agent.tools._loader import get_indices
-from agent.tools._shared import MIN_SCORE, _split_pipe_query
+from agent.tools._shared import MIN_SCORE, _split_pipe_query, resolve_extracted_path
 from agent.tools.get_doc_info import resolve_doc
 from utils.text_utils import strip_html_tags, fuzzy_match
 
@@ -24,7 +24,7 @@ def _multi_fuzzy_match_and(query: str, target: str) -> float:
     prod = 1.0
     for s in scores:
         prod *= s
-    return prod ** (1.0 / len(scores))
+    return prod ** (1.0 / len(terms))
 
 
 def search_text(doc: str, query: str, max_results: int = 10):
@@ -34,7 +34,9 @@ def search_text(doc: str, query: str, max_results: int = 10):
     if not docs:
         return []
     rel_path = docs[0]
-    filepath = os.path.join("public_dataset_upload/extracted", rel_path)
+    filepath = resolve_extracted_path(rel_path)
+    if not os.path.exists(filepath):
+        return []
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
     clean = strip_html_tags(content)
@@ -48,5 +50,5 @@ def search_text(doc: str, query: str, max_results: int = 10):
             start = max(0, i - 2)
             end = min(len(raw_lines), i + 3)
             ctx = "\n".join(rl.strip() for rl in raw_lines[start:end] if rl.strip())
-            matches.append({"line_num": i, "text": ctx[:1200]})
+            matches.append({"doc": rel_path, "line_num": i, "text": ctx[:1200]})
     return matches[:max_results]

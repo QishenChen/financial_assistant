@@ -259,7 +259,20 @@ def _act_step(actions: list[dict]) -> list[dict]:
 
 def _observe_step(act_results: list[dict], collected: list, found_entities: set) -> int:
     new_count = 0
+    any_error = False
     for r in act_results:
+        # If a tool failed, count it as new information so the loop does not
+        # saturate and terminate prematurely. The next THINK step will see the
+        # error and can choose a fallback tool or path.
+        if r.get("error"):
+            any_error = True
+            err_key = f"error:{r.get('tool','')}:{str(r['error'])[:120]}"
+            if err_key not in found_entities:
+                found_entities.add(err_key)
+                new_count += 1
+            collected.append(r)
+            continue
+
         result = r.get("result")
         if result is None:
             collected.append(r)

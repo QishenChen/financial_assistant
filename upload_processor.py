@@ -139,6 +139,7 @@ def process_uploads():
         # Rebuild indices so uploaded docs become queryable
         _run([sys.executable, "indexer.py"])
         _run([sys.executable, "build_page_map.py"])
+        _run([sys.executable, "build_table_index.py"])
 
         # Make sure the running server reloads indices for Planner/tools
         try:
