@@ -13,9 +13,16 @@ A natural-language interface for querying, analyzing, and assessing financial do
 
 ---
 
+## Demo
+
+![Financial assistant web UI](docs/screenshot_demo.png)
+
+---
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Demo](#demo)
 - [Interfaces](#interfaces)
   - [Web App](#web-app)
   - [REST API](#rest-api)
