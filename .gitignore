@@ -3,6 +3,7 @@ __pycache__/
 *.pdf
 *.PDF
 results/
+results.bak/
 *.zip
 *.log
 *.jpg
@@ -10,6 +11,9 @@ results/
 *.jpeg
 *.gif
 *.bmp
-*.zip
-indices/heading_index.json
+indices/
+uploads/
+public_dataset_upload/
+.venv/
 .env
+mineru_batch_state.json
