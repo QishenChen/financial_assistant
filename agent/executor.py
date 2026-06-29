@@ -20,7 +20,7 @@ except ImportError:
     resolve_page = None
 
 
-def execute(query: str, config: dict | None = None, max_rounds: int = 8, max_retries: int = 2) -> dict:
+def execute(query: str, session_context: str = "", config: dict | None = None, max_rounds: int = 8, max_retries: int = 2) -> dict:
     """
     Full Planner → Executor pipeline.
 
@@ -37,7 +37,7 @@ def execute(query: str, config: dict | None = None, max_rounds: int = 8, max_ret
         config = get_llm_config()
 
     # ── Phase 1: Plan ──
-    execution_plan = plan(query, config=config)
+    execution_plan = plan(query, session_context=session_context, config=config)
     steps = execution_plan.get("steps", [])
 
     if not steps:
@@ -54,9 +54,9 @@ def execute(query: str, config: dict | None = None, max_rounds: int = 8, max_ret
         task_type = step_def.get("task_type", "extract")
 
         if task_type == "extract":
-            result = _run_extract_step(step_def, config, max_rounds, max_retries, all_evidence)
+            result = _run_extract_step(step_def, config, max_rounds, max_retries, all_evidence, session_context)
         else:
-            result = _run_synthesize_step(step_def, config, all_evidence)
+            result = _run_synthesize_step(step_def, config, all_evidence, session_context)
 
         all_evidence.append(result["evidence_item"])
         steps_log.append(result["log_entry"])
@@ -74,6 +74,7 @@ def execute(query: str, config: dict | None = None, max_rounds: int = 8, max_ret
         final_output_shape,
         config,
         target_docs,
+        session_context,
     )
 
     plan_tokens = execution_plan.get("token_usage", {})
@@ -97,7 +98,7 @@ def execute(query: str, config: dict | None = None, max_rounds: int = 8, max_ret
     }
 
 
-def _run_extract_step(step_def: dict, config: dict, max_rounds: int, max_retries: int, prior_evidence: list) -> dict:
+def _run_extract_step(step_def: dict, config: dict, max_rounds: int, max_retries: int, prior_evidence: list, session_context: str = "") -> dict:
     """Run parallel ReACT loops for each target sub-area, with audit and retry."""
     objective = step_def.get("objective", "")
     target_scope = step_def.get("target_scope", [])
@@ -109,11 +110,19 @@ def _run_extract_step(step_def: dict, config: dict, max_rounds: int, max_retries
         doc_list = ", ".join(target_docs)
         doc_hint = f" FOCUS on these document(s): {doc_list}. Always pass doc=\"{target_docs[0]}\" to search tools."
 
+    context_hint = ""
+    if session_context:
+        context_hint = (
+            "\nUse the following conversation context and long-term memories to interpret follow-up questions "
+            "and to prioritize topics the user cares about:\n" + session_context
+        )
+
     task_hints = (
         f"EXTRACT task: collect ALL data about: {', '.join(target_scope)}.{doc_hint} "
         "After finding a heading with search_headings, IMMEDIATELY call get_section to read its full content. "
         "Extract every number, ratio, and fact. Use search_tables for structured data. "
         "Use compute() for any arithmetic. When you have thorough coverage, set done=true."
+        f"{context_hint}"
     )
 
     all_ref_map = {}
@@ -180,7 +189,7 @@ def _run_extract_step(step_def: dict, config: dict, max_rounds: int, max_retries
     }
 
 
-def _run_synthesize_step(step_def: dict, config: dict, prior_evidence: list) -> dict:
+def _run_synthesize_step(step_def: dict, config: dict, prior_evidence: list, session_context: str = "") -> dict:
     """Synthesize step: one LLM call using all prior evidence. No ReACT loop, no tools."""
     objective = step_def.get("objective", "")
     task_type = step_def.get("task_type", "reasoning")
@@ -189,13 +198,19 @@ def _run_synthesize_step(step_def: dict, config: dict, prior_evidence: list) -> 
 
     evidence_context = _format_prior_evidence(prior_evidence)
 
+    context_block = ""
+    if session_context:
+        context_block = (
+            "\nConversation context and long-term memories to keep in mind:\n" + session_context + "\n"
+        )
+
     system = f"""You are a financial analyst. You have ALL the data you need — it was already extracted from documents.
 Do NOT try to search for anything. Just analyze the data provided below.
 
 Task: {objective}
 Task type: {task_type}
 Format: {output_shape}
-
+{context_block}
 Use ONLY the data provided below. Compute ratios, YoY changes, trends, comparisons.
 Return the result as a well-formatted {output_shape}."""
 
@@ -342,6 +357,7 @@ def _synthesize_final(
     output_shape: str,
     config: dict,
     target_docs: list = None,
+    session_context: str = "",
 ) -> tuple[str, str]:
     """
     Final synthesis: one LLM call → formatted answer + save to file.
@@ -358,12 +374,19 @@ def _synthesize_final(
     if target_docs:
         doc_hint = f"""The document analyzed is: {doc_id}. Copy EXACTLY "{doc_id}" as the doc_id in links."""
 
+    context_block = ""
+    if session_context:
+        context_block = (
+            "\nConversation context and long-term memories to respect:\n" + session_context + "\n"
+        )
+
     system = f"""You are a financial document analyst. Produce the final analysis report.
 
 Original question: {query}
 Objective: {overall_objective}
 Format: {output_shape} (output as well-formatted markdown)
 {doc_hint}
+{context_block}
 
 Rules:
 - Include ALL specific numbers, ratios, and facts from the evidence

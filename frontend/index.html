@@ -8,9 +8,22 @@
 </head>
 <body>
   <div class="container">
-    <!-- Left: File Panel -->
-    <aside class="panel panel-left" id="filePanel">
+    <!-- Left: Sessions + File Panel -->
+    <aside class="panel panel-left" id="leftPanel">
+      <!-- Sessions -->
       <div class="panel-header">
+        <h2>💬 Sessions</h2>
+        <div class="panel-actions">
+          <button id="newSession" title="New chat">+</button>
+          <button id="refreshSessions" title="Refresh sessions">↻</button>
+        </div>
+      </div>
+      <div class="panel-content session-list" id="sessionList">
+        <p class="loading">Loading sessions...</p>
+      </div>
+
+      <!-- Files -->
+      <div class="panel-header file-panel-header">
         <h2>📁 Documents</h2>
         <div class="panel-actions">
           <a href="/upload" id="uploadFiles" title="Upload documents">⬆️</a>

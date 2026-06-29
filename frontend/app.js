@@ -16,6 +16,7 @@ let currentDocPath = null;
 
 // ── State ──
 let isProcessing = false;
+let currentSessionId = localStorage.getItem('currentSessionId') || null;
 
 // ── DOM ──
 const fileList = document.getElementById('fileList');
@@ -35,6 +36,7 @@ const pdfPageInfo = document.getElementById('pdfPageInfo');
 // ── Initialize ──
 document.addEventListener('DOMContentLoaded', () => {
   loadFiles();
+  loadSessions();
   setupResizers();
   setupSampleQueries();
 
@@ -51,12 +53,141 @@ document.addEventListener('DOMContentLoaded', () => {
   pdfNext.addEventListener('click', () => changePage(1));
 
   document.getElementById('refreshFiles').addEventListener('click', loadFiles);
+  document.getElementById('refreshSessions').addEventListener('click', loadSessions);
+  document.getElementById('newSession').addEventListener('click', createNewSession);
 
   // Auto-refresh the file list while background extraction/indexing runs
   setInterval(() => {
     if (!isProcessing) loadFiles();
   }, 10000);
+
+  // If we have a saved session, load its history.
+  if (currentSessionId) {
+    loadSession(currentSessionId);
+  }
 });
+
+// ── Sessions ──
+async function loadSessions() {
+  try {
+    const resp = await fetch(`${API_BASE}/sessions`);
+    const data = await resp.json();
+    const list = document.getElementById('sessionList');
+    list.innerHTML = '';
+
+    const sessions = data.sessions || [];
+    if (sessions.length === 0) {
+      list.innerHTML = '<p class="loading">No sessions yet. Start a new chat.</p>';
+      return;
+    }
+
+    for (const s of sessions) {
+      const div = document.createElement('div');
+      div.className = 'file-item session-item';
+      if (s.id === currentSessionId) {
+        div.classList.add('active');
+      }
+      div.style.paddingLeft = '16px';
+      const date = new Date(s.updated_at * 1000).toLocaleString();
+      div.textContent = s.title || 'Untitled chat';
+      div.title = `Updated: ${date}`;
+      div.addEventListener('click', () => {
+        currentSessionId = s.id;
+        localStorage.setItem('currentSessionId', currentSessionId);
+        loadSession(currentSessionId);
+        loadSessions(); // re-render highlights
+      });
+      list.appendChild(div);
+    }
+  } catch (e) {
+    document.getElementById('sessionList').innerHTML = '<p class="loading">Failed to load sessions</p>';
+  }
+}
+
+async function createNewSession() {
+  try {
+    const resp = await fetch(`${API_BASE}/sessions/new`, { method: 'POST' });
+    const data = await resp.json();
+    currentSessionId = data.session_id;
+    localStorage.setItem('currentSessionId', currentSessionId);
+    chatHistory.innerHTML = '';
+    addWelcomeMessage();
+    loadSessions();
+  } catch (e) {
+    console.error('Failed to create session:', e);
+  }
+}
+
+async function loadSession(sessionId) {
+  try {
+    const resp = await fetch(`${API_BASE}/sessions/${sessionId}`);
+    if (!resp.ok) {
+      // Session may have been deleted; reset.
+      currentSessionId = null;
+      localStorage.removeItem('currentSessionId');
+      return;
+    }
+    const data = await resp.json();
+    chatHistory.innerHTML = '';
+    const messages = data.messages || [];
+    if (messages.length === 0) {
+      addWelcomeMessage();
+    } else {
+      for (const m of messages) {
+        renderMessage(m.role, m.content, m.file_path);
+      }
+    }
+    chatHistory.scrollTop = chatHistory.scrollHeight;
+  } catch (e) {
+    console.error('Failed to load session:', e);
+  }
+}
+
+function addWelcomeMessage() {
+  chatHistory.innerHTML = `
+    <div class="welcome-message">
+      <h1>📊 Financial Document Intelligence</h1>
+      <p>Ask questions about financial documents. The system will extract, analyze, and synthesize answers.</p>
+      <div class="sample-queries">
+        <span class="sample" data-query="分析招商银行坏账以及信用风险，收集详细数据">分析招商银行坏账及信用风险</span>
+        <span class="sample" data-query="Compare R&D spending of BYD vs CATL">Compare BYD vs CATL R&D</span>
+        <span class="sample" data-query="中国建筑有哪些施工项目城市？">中国建筑施工项目城市</span>
+      </div>
+    </div>
+  `;
+  setupSampleQueries();
+}
+
+function renderMessage(role, content, filePath) {
+  if (role === 'assistant') {
+    const msgDiv = addMessage('assistant', '');
+    let processed = content.replace(
+      /\[([^\]]*?)\]\(ref:([^:)\s]+)(?::([^)\s]+))?\)/g,
+      (match, text, docId, pageNum) => {
+        const pageAttr = pageNum ? ' data-page="' + escapeHtml(pageNum) + '"' : ' data-page=""';
+        const label = pageNum ? docId + ' p.' + pageNum : docId;
+        return '<a href="#" class="ref-badge pdf-ref" data-doc="' + escapeHtml(docId) + '"' + pageAttr +
+               ' style="display:inline-block;background:#1f6feb22;color:#58a6ff;border:1px solid #1f6feb44;padding:1px 8px;border-radius:4px;font-size:11px;cursor:pointer;margin:0 2px;text-decoration:none;"' +
+               ' title="View source: ' + escapeHtml(label) + '">📎 ' + escapeHtml(label) + '</a>';
+      }
+    );
+    if (filePath) {
+      processed += `\n\n<small style="color:#8b949e">📄 Report saved to: ${escapeHtml(filePath)}</small>`;
+    }
+    if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
+      try {
+        msgDiv.querySelector('.msg-content').innerHTML = marked.parse(processed, { breaks: true, gfm: true });
+      } catch {
+        msgDiv.querySelector('.msg-content').innerHTML = escapeHtml(processed).replace(/\n/g, '<br>');
+      }
+    } else {
+      msgDiv.querySelector('.msg-content').innerHTML = escapeHtml(processed).replace(/\n/g, '<br>');
+    }
+    attachPdfLinks(msgDiv);
+  } else {
+    addMessage('user', content);
+  }
+}
 
 // ── File List ──
 async function loadFiles() {
@@ -186,10 +317,16 @@ async function submitQuery() {
     const resp = await fetch(`${API_BASE}/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query, session_id: currentSessionId }),
     });
 
     const data = await resp.json();
+
+    if (data.session_id) {
+      currentSessionId = data.session_id;
+      localStorage.setItem('currentSessionId', currentSessionId);
+      loadSessions();
+    }
 
     stepsDiv.innerHTML = '';
     const stepsLog = data.steps_log || [];
@@ -201,39 +338,9 @@ async function submitQuery() {
     });
 
     const answer = data.answer || '(No answer)';
-    
-    // Pre-process: replace [text](ref:doc_id:page) or [text](ref:doc_id) with badge HTML BEFORE marked.js render
-    var processedAnswer = answer.replace(
-      /\[([^\]]*?)\]\(ref:([^:)\s]+)(?::([^)\s]+))?\)/g,
-      function(match, text, docId, pageNum) {
-        var pageAttr = pageNum ? ' data-page="' + escapeHtml(pageNum) + '"' : ' data-page=""';
-        var label = pageNum ? docId + ' p.' + pageNum : docId;
-        return '<a href="#" class="ref-badge pdf-ref" data-doc="' + escapeHtml(docId) + '"' + pageAttr + 
-               ' style="display:inline-block;background:#1f6feb22;color:#58a6ff;border:1px solid #1f6feb44;padding:1px 8px;border-radius:4px;font-size:11px;cursor:pointer;margin:0 2px;text-decoration:none;"' +
-               ' title="View source: ' + escapeHtml(label) + '"' +
-               ' onmouseenter="this.style.background=\'#1f6feb44\'" onmouseleave="this.style.background=\'#1f6feb22\'">' +
-               '\uD83D\uDCCE ' + escapeHtml(label) + '</a>';
-      }
-    );
-    
-    if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
-      try {
-        msgDiv.querySelector('.msg-content').innerHTML = marked.parse(processedAnswer, { breaks: true, gfm: true });
-      } catch {
-        msgDiv.querySelector('.msg-content').innerHTML = escapeHtml(processedAnswer).replace(/\n/g, '<br>');
-      }
-    } else {
-      msgDiv.querySelector('.msg-content').innerHTML = escapeHtml(processedAnswer).replace(/\n/g, '<br>');
-    }
-
-    if (data.file_path) {
-      const link = document.createElement('div');
-      link.style.marginTop = '8px';
-      link.innerHTML = `<small style="color:#8b949e">📄 Report saved to: ${data.file_path}</small>`;
-      msgDiv.querySelector('.msg-content').appendChild(link);
-    }
-
-    attachPdfLinks(msgDiv);
+    renderMessage('assistant', answer, data.file_path);
+    // Remove the spinner placeholder we created earlier.
+    msgDiv.remove();
 
   } catch (e) {
     msgDiv.querySelector('.msg-content').innerHTML = `<p style="color:#f85149">Error: ${e.message}</p>`;

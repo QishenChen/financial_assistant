@@ -75,7 +75,7 @@ def build_document_catalog() -> str:
     return "\n".join(catalog_lines)
 
 
-def plan(query: str, config: dict | None = None) -> dict:
+def plan(query: str, session_context: str = "", config: dict | None = None) -> dict:
     """
     Generate a multi-step execution plan from a natural language query.
 
@@ -143,8 +143,14 @@ Return ONLY a JSON object:
   ]
 }"""
 
-    prompt = f"""User query: {query}
+    context_block = ""
+    if session_context:
+        context_block = (
+            "\nConversation context and relevant long-term memories:\n" + session_context + "\n"
+        )
 
+    prompt = f"""User query: {query}
+{context_block}
 Available document catalog:
 {catalog}
 

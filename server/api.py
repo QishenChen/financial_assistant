@@ -29,6 +29,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent.executor import execute
 from agent.llm_reasoner import get_llm_config
+from agent.memory import (
+    create_session,
+    get_session,
+    list_sessions,
+    delete_session,
+    clear_session_messages,
+    append_message,
+    get_messages,
+    build_session_context,
+    extract_and_store_memories,
+)
 from upload_namer import build_metadata, load_metadata, _fallback_name
 
 try:
@@ -76,9 +87,11 @@ app.mount("/extracted", StaticFiles(directory="public_dataset_upload/extracted")
 
 class QueryRequest(BaseModel):
     query: str = Field(..., description="Natural language question about financial documents")
+    session_id: str | None = Field(None, description="Optional session ID; a new session is created if omitted")
 
 
 class QueryResponse(BaseModel):
+    session_id: str = ""
     task_type: str = ""
     overall_objective: str = ""
     output_shape: str = ""
@@ -90,17 +103,45 @@ class QueryResponse(BaseModel):
     error: str | None = None
 
 
-def _run_and_respond(query: str) -> dict:
-    """Execute a query and format the response."""
-    result = execute(query)
+def _run_and_respond(query: str, session_id: str | None = None) -> dict:
+    """Execute a query in the context of a session and format the response."""
+    if not session_id or not get_session(session_id):
+        session_id = create_session()
+
+    # Append user message before generating the answer.
+    append_message(session_id, "user", query)
+
+    # Build short-term + long-term memory context.
+    session_context = build_session_context(session_id, query)
+
+    result = execute(query, session_context=session_context)
+
+    answer = result.get("answer", "")
+    file_path = result.get("file_path", "")
+
+    # Append assistant message.
+    append_message(session_id, "assistant", answer, file_path=file_path or None)
+
+    # Extract durable memories asynchronously in a background thread so the
+    # response is not delayed.
+    def _extract():
+        try:
+            extract_and_store_memories(query, answer)
+        except Exception as e:
+            print(f"[memory] extraction failed: {e}")
+
+    import threading
+    threading.Thread(target=_extract, daemon=True).start()
+
     return {
+        "session_id": session_id,
         "task_type": result.get("task_type", ""),
         "overall_objective": result.get("overall_objective", ""),
         "output_shape": result.get("output_shape", "paragraph"),
-        "answer": result.get("answer", ""),
+        "answer": answer,
         "confidence": result.get("confidence", 0.0),
         "steps_log": result.get("steps_log", []),
-        "file_path": result.get("file_path", ""),
+        "file_path": file_path,
         "token_usage": result.get("token_usage", {}),
         "error": result.get("error"),
     }
@@ -425,7 +466,49 @@ async def query_endpoint(req: QueryRequest):
     """Full Planner → Executor pipeline. Planner auto-detects task type."""
     # Executor makes synchronous LLM/tool calls; run it in a thread so the
     # event loop stays responsive to other requests.
-    return await run_in_threadpool(_run_and_respond, req.query)
+    return await run_in_threadpool(_run_and_respond, req.query, req.session_id)
+
+
+@app.post("/sessions/new")
+async def new_session():
+    """Create a new chat session."""
+    session_id = create_session()
+    return {"session_id": session_id, "title": "New chat", "created_at": time.time()}
+
+
+@app.get("/sessions")
+async def sessions_list():
+    """List recent chat sessions."""
+    sessions = list_sessions()
+    return {"sessions": sessions}
+
+
+@app.get("/sessions/{session_id}")
+async def session_detail(session_id: str):
+    """Get session metadata and full message history."""
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    messages = get_messages(session_id)
+    return {"session": dict(session), "messages": messages}
+
+
+@app.post("/sessions/{session_id}/clear")
+async def clear_session(session_id: str):
+    """Clear all messages in a session but keep the session itself."""
+    if not get_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    clear_session_messages(session_id)
+    return {"ok": True}
+
+
+@app.delete("/sessions/{session_id}")
+async def remove_session(session_id: str):
+    """Delete a session and all its messages."""
+    if not get_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    delete_session(session_id)
+    return {"ok": True}
 
 
 @app.get("/health")

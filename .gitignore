@@ -17,3 +17,4 @@ public_dataset_upload/
 .venv/
 .env
 mineru_batch_state.json
+data/
