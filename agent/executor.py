@@ -204,14 +204,16 @@ def _run_synthesize_step(step_def: dict, config: dict, prior_evidence: list, ses
             "\nConversation context and long-term memories to keep in mind:\n" + session_context + "\n"
         )
 
-    system = f"""You are a financial analyst. You have ALL the data you need — it was already extracted from documents.
-Do NOT try to search for anything. Just analyze the data provided below.
+    system = f"""You are a financial analyst.
+If document evidence is provided below, use ONLY that evidence to perform the task.
+If no document evidence is provided and the task can be answered from the conversation context, use the conversation context and long-term memories instead.
+Do NOT try to search for anything.
 
 Task: {objective}
 Task type: {task_type}
 Format: {output_shape}
 {context_block}
-Use ONLY the data provided below. Compute ratios, YoY changes, trends, comparisons.
+Compute ratios, YoY changes, trends, comparisons when relevant.
 Return the result as a well-formatted {output_shape}."""
 
     prompt = f"""Data from previous steps:
@@ -294,6 +296,9 @@ def _format_prior_evidence_with_pages(prior_evidence: list) -> str:
                         parts.append(
                             f"  [doc_id={doc_id}, page=?] {text}"
                         )
+            synthesis = evidence.get("synthesis", "")
+            if synthesis:
+                parts.append(f"Synthesis / intermediate result:\n{synthesis}")
         elif isinstance(evidence, str):
             parts.append(evidence[:3000])
     return "\n".join(parts)
@@ -394,18 +399,15 @@ Rules:
 - Structure with clear headings (## Section Title)
 - Write in Chinese since the user asked in Chinese
 
-MANDATORY SOURCE LINKS — add at least 5-8 throughout the report:
-Use this format for links WITHOUT page numbers:
-  [来源: {doc_id}](ref:{doc_id})
-Use this format for links WITH page numbers (when evidence says "[doc_id=..., page=N]"):
-  [来源: {doc_id} p.N](ref:{doc_id}:N)
+SOURCE LINKS:
+- If the evidence includes document sources, add source links using the page numbers provided:
+    [来源: {doc_id} p.N](ref:{doc_id}:N)
+  or, if no page number is available:
+    [来源: {doc_id}](ref:{doc_id})
+- NEVER invent page numbers — only use the ones provided in evidence.
+- If no document evidence is available, answer directly from the conversation context and omit source links.
 
-IMPORTANT: ALWAYS include the page number when the evidence provides it.
-Look for "[doc_id=..., page=N]" in the evidence and use those page numbers.
-Only omit the page if evidence says "page=?".
-NEVER invent page numbers — only use the ones provided in evidence.
-
-Return the complete markdown report with source links."""
+Return the complete markdown report."""
 
     prompt = f"""All evidence (with doc_id and page numbers for linking):
 {evidence_text}

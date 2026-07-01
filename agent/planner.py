@@ -102,22 +102,30 @@ by breaking the user's query into a sequence of steps. Each step has its own tas
 Task types:
 - extract: Pull specific facts, entities, or data points from documents.
 - reasoning: Analyze, compare, compute ratios, draw conclusions from extracted data.
-- output: Synthesize into free text, summaries, or formatted reports.
-- qa: Quality assurance — assess documents for completeness, accuracy, compliance.
+- output: Synthesize the final answer for the user.
+- qa: Quality assurance — review the answer for completeness, accuracy, and compliance.
 
-For a complex analytical query, use a chain like:
-  Step 1: extract — collect raw data
-  Step 2: reasoning — compute comparisons, ratios, trends
-  Step 3: output — synthesize into a readable report
-
-For simple queries like "list all cities", use a single extract step.
+Planning rules:
+1. EVERY plan MUST include an `output` step and a `qa` step.
+2. Include an `extract` step ONLY if the user is asking for new facts that are not already 
+   covered by the conversation context or long-term memories.
+   - Greetings, meta-questions, requests to summarize/rephrase prior answers, or general 
+     chitchat do NOT need an extract step.
+   - Questions about specific numbers, companies, reports, ratios, or document contents 
+     DO need an extract step.
+3. For a complex analytical query that needs new data, use a chain like:
+     Step 1: extract — collect raw data
+     Step 2: reasoning — compute comparisons, ratios, trends (optional)
+     Step 3: output — synthesize the final answer
+     Step 4: qa — review the answer
+4. For a simple factual question that needs new data, use: extract → output → qa.
+5. For questions that need no new data, use only: output → qa.
 
 target_scope: Conceptual sub-areas to investigate. NOT document section names — 
 the search tools find those dynamically. Use descriptive phrases.
 
-target_docs: List of document IDs to focus on. If the user mentions a specific company, report,
-or document, identify the matching document ID from the catalog. For extract steps,
-include 1-3 most relevant document IDs. Leave empty for broad cross-document searches.
+target_docs: List of document IDs to focus on. For extract steps, include 1-3 most relevant 
+document IDs. Leave empty otherwise.
 
 Return ONLY a JSON object:
 {
@@ -127,18 +135,26 @@ Return ONLY a JSON object:
     {
       "step": 1,
       "task_type": "extract",
-      "objective": "What this step accomplishes",
+      "objective": "Collect the requested data from documents",
       "target_scope": ["conceptual sub-area 1", "conceptual sub-area 2"],
       "target_docs": ["annual_cmb_2025_report"],
       "output_shape": "structured_data"
     },
     {
       "step": 2,
-      "task_type": "reasoning",
-      "objective": "Analyze and compare extracted data",
-      "target_scope": ["trend analysis", "ratio computation"],
+      "task_type": "output",
+      "objective": "Synthesize the final answer",
+      "target_scope": [],
       "target_docs": [],
-      "output_shape": "table"
+      "output_shape": "paragraph"
+    },
+    {
+      "step": 3,
+      "task_type": "qa",
+      "objective": "Review the answer for completeness and accuracy",
+      "target_scope": [],
+      "target_docs": [],
+      "output_shape": "assessment_report"
     }
   ]
 }"""
@@ -176,6 +192,31 @@ Produce the multi-step execution plan. Simple queries get 1 step; complex analyt
     for s in steps:
         if s.get("task_type") not in valid_types:
             s["task_type"] = "extract"
+
+    # Enforce the rule: every plan must have output and qa steps.
+    has_output = any(s.get("task_type") == "output" for s in steps)
+    has_qa = any(s.get("task_type") == "qa" for s in steps)
+    if not has_output:
+        steps.append({
+            "step": 0,
+            "task_type": "output",
+            "objective": "Synthesize the final answer for the user",
+            "target_scope": [],
+            "target_docs": [],
+            "output_shape": plan_data.get("output_shape", "paragraph"),
+        })
+    if not has_qa:
+        steps.append({
+            "step": 0,
+            "task_type": "qa",
+            "objective": "Review the answer for completeness, accuracy, and compliance",
+            "target_scope": [],
+            "target_docs": [],
+            "output_shape": "assessment_report",
+        })
+    # Renumber steps sequentially.
+    for i, s in enumerate(steps, start=1):
+        s["step"] = i
 
     return {
         "steps": steps,
