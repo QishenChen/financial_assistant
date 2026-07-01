@@ -20,7 +20,14 @@ except ImportError:
     resolve_page = None
 
 
-def execute(query: str, session_context: str = "", config: dict | None = None, max_rounds: int = 8, max_retries: int = 2) -> dict:
+def execute(
+    query: str,
+    session_context: str = "",
+    config: dict | None = None,
+    max_rounds: int = 8,
+    max_retries: int = 2,
+    max_replan: int = 1,
+) -> dict:
     """
     Full Planner → Executor pipeline.
 
@@ -29,56 +36,86 @@ def execute(query: str, session_context: str = "", config: dict | None = None, m
         config: Optional LLM config
         max_rounds: Max ReACT rounds for extract step
         max_retries: Max replan+retry for extract step
+        max_replan: Max extra planning rounds triggered by a failed QA step
 
     Returns:
-        {task_type, overall_objective, answer, file_path, steps_log, token_usage, confidence}
+        {task_type, overall_objective, answer, file_path, steps_log, token_usage, confidence, replan_count}
     """
     if config is None:
         config = get_llm_config()
 
-    # ── Phase 1: Plan ──
-    execution_plan = plan(query, session_context=session_context, config=config)
-    steps = execution_plan.get("steps", [])
-
-    if not steps:
-        return {"error": "Planner produced no steps", "answer": ""}
-
-    # ── Phase 2: Execute ──
-    all_evidence = []
-    steps_log = []
+    all_evidence: list = []
+    steps_log: list = []
     total_exec_prompt = 0
     total_exec_completion = 0
+    all_step_types: list[str] = []
+    execution_plan = None
+    replan_context = ""
+    replan_count = 0
 
-    first_extract = next((s for s in steps if s.get("task_type") == "extract"), steps[0] if steps else {})
-    target_docs = first_extract.get("target_docs", [])
+    for round_num in range(max_replan + 1):
+        # ── Phase 1: Plan / Replan ──
+        plan_context = session_context
+        if replan_context:
+            plan_context = plan_context + "\n\n" + replan_context
+        execution_plan = plan(query, session_context=plan_context, config=config)
+        steps = execution_plan.get("steps", [])
 
-    for step_def in steps:
-        step_num = step_def["step"]
-        task_type = step_def.get("task_type", "extract")
+        if not steps:
+            return {"error": "Planner produced no steps", "answer": ""}
 
-        if task_type == "extract":
-            result = _run_extract_step(step_def, config, max_rounds, max_retries, all_evidence, session_context)
-        elif task_type == "output":
-            result = _run_synthesize_step(
-                step_def,
-                config,
-                all_evidence,
-                session_context,
-                query=query,
-                overall_objective=execution_plan.get("overall_objective", query),
-                target_docs=target_docs,
-            )
-        else:
-            result = _run_synthesize_step(step_def, config, all_evidence, session_context)
+        # ── Phase 2: Execute steps ──
+        first_extract = next((s for s in steps if s.get("task_type") == "extract"), steps[0] if steps else {})
+        target_docs = first_extract.get("target_docs", [])
 
-        all_evidence.append(result["evidence_item"])
-        steps_log.append(result["log_entry"])
-        total_exec_prompt += result.get("prompt_tokens", 0)
-        total_exec_completion += result.get("completion_tokens", 0)
+        for step_def in steps:
+            task_type = step_def.get("task_type", "extract")
+            all_step_types.append(task_type)
 
-    # ── Phase 3: Output step is the final answer ──
-    final_output_shape = execution_plan.get("output_shape", "paragraph")
-    output_item = next((item for item in all_evidence if item.get("task_type") == "output"), None)
+            if task_type == "extract":
+                result = _run_extract_step(step_def, config, max_rounds, max_retries, all_evidence, session_context)
+            elif task_type == "output":
+                result = _run_synthesize_step(
+                    step_def,
+                    config,
+                    all_evidence,
+                    session_context,
+                    query=query,
+                    overall_objective=execution_plan.get("overall_objective", query),
+                    target_docs=target_docs,
+                )
+            else:
+                result = _run_synthesize_step(step_def, config, all_evidence, session_context)
+
+            all_evidence.append(result["evidence_item"])
+            steps_log.append(result["log_entry"])
+            total_exec_prompt += result.get("prompt_tokens", 0)
+            total_exec_completion += result.get("completion_tokens", 0)
+
+        # ── Phase 3: Check QA verdict ──
+        qa_item = next((item for item in reversed(all_evidence) if item.get("task_type") == "qa"), None)
+        if not qa_item:
+            break
+
+        qa_result = qa_item.get("evidence", {}).get("qa_result", {})
+        verdict = str(qa_result.get("verdict", "PASS")).upper()
+        if verdict != "FAIL" or round_num == max_replan:
+            break
+
+        # QA failed and we have replan budget left → prepare history context and replan.
+        replan_count += 1
+        gaps = qa_result.get("gaps", [])
+        history_summary = _format_replan_history(all_evidence, steps_log)
+        replan_context = (
+            f"Previous execution round #{round_num + 1} failed QA.\n"
+            f"QA gaps:\n" + "\n".join(f"  - {g}" for g in gaps) + "\n\n"
+            f"Execution history summary:\n{history_summary}\n\n"
+            "Produce a revised plan that addresses the gaps above. Avoid repeating the same failed approach."
+        )
+
+    # ── Phase 4: Output step is the final answer ──
+    final_output_shape = execution_plan.get("output_shape", "paragraph") if execution_plan else "paragraph"
+    output_item = next((item for item in reversed(all_evidence) if item.get("task_type") == "output"), None)
     if output_item:
         answer = output_item.get("evidence", {}).get("synthesis", "")
         ref_map = {}
@@ -92,15 +129,15 @@ def execute(query: str, session_context: str = "", config: dict | None = None, m
         # Fallback if planner somehow omitted output step.
         answer, file_path = _synthesize_final(
             query,
-            execution_plan.get("overall_objective", query),
+            execution_plan.get("overall_objective", query) if execution_plan else query,
             all_evidence,
             final_output_shape,
             config,
-            target_docs,
+            target_docs if "target_docs" in locals() else [],
             session_context,
         )
 
-    plan_tokens = execution_plan.get("token_usage", {})
+    plan_tokens = execution_plan.get("token_usage", {}) if execution_plan else {}
     total_tokens = {
         "plan_prompt": plan_tokens.get("prompt_tokens", 0),
         "plan_completion": plan_tokens.get("completion_tokens", 0),
@@ -109,16 +146,28 @@ def execute(query: str, session_context: str = "", config: dict | None = None, m
     }
 
     return {
-        "task_type": " → ".join(s.get("task_type", "") for s in steps),
-        "overall_objective": execution_plan["overall_objective"],
+        "task_type": " → ".join(all_step_types),
+        "overall_objective": execution_plan["overall_objective"] if execution_plan else query,
         "output_shape": final_output_shape,
         "answer": answer,
         "file_path": file_path,
         "steps_log": steps_log,
         "token_usage": total_tokens,
         "confidence": 0.85,
-        "error": execution_plan.get("error"),
+        "replan_count": replan_count,
+        "error": execution_plan.get("error") if execution_plan else None,
     }
+
+
+def _format_replan_history(all_evidence: list, steps_log: list) -> str:
+    """Build a concise summary of previous execution rounds for replanning."""
+    parts = []
+    for item in all_evidence:
+        stype = item.get("task_type", "unknown")
+        obj = item.get("objective", "")
+        synth = str(item.get("evidence", {}).get("synthesis", ""))[:250].replace("\n", " ")
+        parts.append(f"- {stype}: {obj}\n  result: {synth}")
+    return "\n".join(parts)
 
 
 def _run_extract_step(step_def: dict, config: dict, max_rounds: int, max_retries: int, prior_evidence: list, session_context: str = "") -> dict:
@@ -244,15 +293,24 @@ def _run_synthesize_step(
             query, overall_objective, objective, output_shape, context_block, evidence_context, target_docs
         )
 
-    result = reason(prompt=prompt, system=system, config=config)
+    result = reason(prompt=prompt, system=system, config=config, json_mode=(task_type == "qa"))
     content = result.get("content", "")
+    parsed = result.get("parsed") or {}
+
+    evidence_payload = {"synthesis": content[:5000]}
+    if task_type == "qa" and isinstance(parsed, dict):
+        evidence_payload["qa_result"] = parsed
+        # Store the human-readable assessment as the synthesis for downstream prompts.
+        assessment = parsed.get("assessment", "")
+        if assessment:
+            evidence_payload["synthesis"] = str(assessment)[:5000]
 
     return {
         "evidence_item": {
             "step": step_num,
             "task_type": task_type,
             "objective": objective,
-            "evidence": {"synthesis": content[:5000]},
+            "evidence": evidence_payload,
             "passed": True,
         },
         "log_entry": {
@@ -298,14 +356,17 @@ Rules:
 - Identify gaps, unsupported claims, contradictions, or missing sources.
 - Verify units, time periods, and definitions are consistent.
 - Assess whether the evidence fully answers the user's question.
-- Return a concise audit / quality assessment as {output_shape}."""
+- Return ONLY JSON in this exact format:
+  {{"verdict": "PASS or FAIL", "gaps": ["gap 1", "gap 2"], "assessment": "concise explanation"}}
+- Use FAIL only if the answer is incomplete, inconsistent, or unsupported and requires additional investigation.
+- Be specific about what additional evidence or fix is needed."""
 
     prompt = f"""Data from previous steps:
 {evidence_context}
 
 {objective}
 
-Provide your quality assessment as a {output_shape}."""
+Provide your quality assessment as JSON."""
     return system, prompt
 
 
