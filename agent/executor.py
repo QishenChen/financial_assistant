@@ -49,12 +49,25 @@ def execute(query: str, session_context: str = "", config: dict | None = None, m
     total_exec_prompt = 0
     total_exec_completion = 0
 
+    first_extract = next((s for s in steps if s.get("task_type") == "extract"), steps[0] if steps else {})
+    target_docs = first_extract.get("target_docs", [])
+
     for step_def in steps:
         step_num = step_def["step"]
         task_type = step_def.get("task_type", "extract")
 
         if task_type == "extract":
             result = _run_extract_step(step_def, config, max_rounds, max_retries, all_evidence, session_context)
+        elif task_type == "output":
+            result = _run_synthesize_step(
+                step_def,
+                config,
+                all_evidence,
+                session_context,
+                query=query,
+                overall_objective=execution_plan.get("overall_objective", query),
+                target_docs=target_docs,
+            )
         else:
             result = _run_synthesize_step(step_def, config, all_evidence, session_context)
 
@@ -63,19 +76,29 @@ def execute(query: str, session_context: str = "", config: dict | None = None, m
         total_exec_prompt += result.get("prompt_tokens", 0)
         total_exec_completion += result.get("completion_tokens", 0)
 
-    # ── Phase 3: Final synthesis → file ──
+    # ── Phase 3: Output step is the final answer ──
     final_output_shape = execution_plan.get("output_shape", "paragraph")
-    first_extract = next((s for s in steps if s.get("task_type") == "extract"), steps[0] if steps else {})
-    target_docs = first_extract.get("target_docs", [])
-    answer, file_path = _synthesize_final(
-        query,
-        execution_plan.get("overall_objective", query),
-        all_evidence,
-        final_output_shape,
-        config,
-        target_docs,
-        session_context,
-    )
+    output_item = next((item for item in all_evidence if item.get("task_type") == "output"), None)
+    if output_item:
+        answer = output_item.get("evidence", {}).get("synthesis", "")
+        ref_map = {}
+        for item in all_evidence:
+            if isinstance(item, dict) and "ref_map" in item:
+                ref_map.update(item["ref_map"])
+        if ref_map:
+            answer = _replace_ref_tokens(answer, ref_map)
+        file_path = _write_result_file(query, answer)
+    else:
+        # Fallback if planner somehow omitted output step.
+        answer, file_path = _synthesize_final(
+            query,
+            execution_plan.get("overall_objective", query),
+            all_evidence,
+            final_output_shape,
+            config,
+            target_docs,
+            session_context,
+        )
 
     plan_tokens = execution_plan.get("token_usage", {})
     total_tokens = {
@@ -189,14 +212,22 @@ def _run_extract_step(step_def: dict, config: dict, max_rounds: int, max_retries
     }
 
 
-def _run_synthesize_step(step_def: dict, config: dict, prior_evidence: list, session_context: str = "") -> dict:
-    """Synthesize step: one LLM call using all prior evidence. No ReACT loop, no tools."""
+def _run_synthesize_step(
+    step_def: dict,
+    config: dict,
+    prior_evidence: list,
+    session_context: str = "",
+    query: str = "",
+    overall_objective: str = "",
+    target_docs: list = None,
+) -> dict:
+    """Run a reasoning, output, or qa synthesis step with a task-specific prompt."""
     objective = step_def.get("objective", "")
-    task_type = step_def.get("task_type", "reasoning")
-    output_shape = step_def.get("output_shape", "table")
+    task_type = step_def.get("task_type", "output")
+    output_shape = step_def.get("output_shape", "paragraph")
     step_num = step_def["step"]
 
-    evidence_context = _format_prior_evidence(prior_evidence)
+    evidence_context = _format_prior_evidence_with_pages(prior_evidence)
 
     context_block = ""
     if session_context:
@@ -204,24 +235,14 @@ def _run_synthesize_step(step_def: dict, config: dict, prior_evidence: list, ses
             "\nConversation context and long-term memories to keep in mind:\n" + session_context + "\n"
         )
 
-    system = f"""You are a financial analyst.
-If document evidence is provided below, use ONLY that evidence to perform the task.
-If no document evidence is provided and the task can be answered from the conversation context, use the conversation context and long-term memories instead.
-Do NOT try to search for anything.
-
-Task: {objective}
-Task type: {task_type}
-Format: {output_shape}
-{context_block}
-Compute ratios, YoY changes, trends, comparisons when relevant.
-Return the result as a well-formatted {output_shape}."""
-
-    prompt = f"""Data from previous steps:
-{evidence_context}
-
-{objective}
-
-Provide your analysis as a {output_shape}."""
+    if task_type == "reasoning":
+        system, prompt = _build_reasoning_prompt(objective, output_shape, context_block, evidence_context)
+    elif task_type == "qa":
+        system, prompt = _build_qa_prompt(objective, output_shape, context_block, evidence_context)
+    else:  # output / fallback
+        system, prompt = _build_output_prompt(
+            query, overall_objective, objective, output_shape, context_block, evidence_context, target_docs
+        )
 
     result = reason(prompt=prompt, system=system, config=config)
     content = result.get("content", "")
@@ -244,6 +265,90 @@ Provide your analysis as a {output_shape}."""
         "prompt_tokens": result.get("usage", {}).get("prompt_tokens", 0),
         "completion_tokens": result.get("usage", {}).get("completion_tokens", 0),
     }
+
+
+def _build_reasoning_prompt(objective: str, output_shape: str, context_block: str, evidence_context: str) -> tuple[str, str]:
+    system = f"""You are a financial reasoning engine. Analyze, compare, compute, and draw conclusions from the evidence provided below. Do NOT search for new information.
+
+Task: {objective}
+Format: {output_shape}
+{context_block}
+Rules:
+- Use ONLY the evidence listed under "Data from previous steps".
+- Compute ratios, YoY changes, trends, and comparisons explicitly.
+- Flag any missing data or contradictions.
+- Return your analysis as a well-formatted {output_shape}. Do NOT write the final user-facing report here."""
+
+    prompt = f"""Data from previous steps:
+{evidence_context}
+
+{objective}
+
+Provide your analysis as a {output_shape}."""
+    return system, prompt
+
+
+def _build_qa_prompt(objective: str, output_shape: str, context_block: str, evidence_context: str) -> tuple[str, str]:
+    system = f"""You are a rigorous financial data quality auditor. Review the evidence and prior analysis for completeness, accuracy, and consistency. Do NOT search for new information.
+
+Task: {objective}
+Format: {output_shape}
+{context_block}
+Rules:
+- Identify gaps, unsupported claims, contradictions, or missing sources.
+- Verify units, time periods, and definitions are consistent.
+- Assess whether the evidence fully answers the user's question.
+- Return a concise audit / quality assessment as {output_shape}."""
+
+    prompt = f"""Data from previous steps:
+{evidence_context}
+
+{objective}
+
+Provide your quality assessment as a {output_shape}."""
+    return system, prompt
+
+
+def _build_output_prompt(
+    query: str,
+    overall_objective: str,
+    objective: str,
+    output_shape: str,
+    context_block: str,
+    evidence_context: str,
+    target_docs: list,
+) -> tuple[str, str]:
+    doc_hint = ""
+    doc_id = target_docs[0] if target_docs else "unknown_doc"
+    if target_docs:
+        doc_hint = f'The primary document analyzed is: {doc_id}. Use EXACTLY "{doc_id}" as the doc_id in any source links.'
+
+    system = f"""You are a financial report writer. Synthesize the evidence and prior analysis into the final answer for the user. This is the answer that will be shown directly to the user. Do NOT search for new information.
+
+Original question: {query}
+Objective: {overall_objective}
+Task: {objective}
+Format: {output_shape} (output as well-formatted markdown)
+{doc_hint}
+{context_block}
+Rules:
+- Include ALL specific numbers, ratios, and facts from the evidence.
+- For comparison data, use markdown tables.
+- Structure with clear headings (## Section Title).
+- Write in Chinese since the user asked in Chinese.
+- Cite sources using the evidence annotations:
+    [来源: {doc_id} p.N](ref:{doc_id}:N)  when a page number is available
+    [来源: {doc_id}](ref:{doc_id})        when no page number is available
+- NEVER invent page numbers — only use the ones provided in evidence.
+- If no document evidence is available, answer directly from the conversation context and omit source links.
+
+Return the complete markdown answer."""
+
+    prompt = f"""All evidence and analysis:
+{evidence_context}
+
+Produce the final {output_shape} answer."""
+    return system, prompt
 
 
 def _format_prior_evidence(prior_evidence: list) -> str:
@@ -425,15 +530,19 @@ Produce the final report with clickable source links. Include page numbers whene
     if ref_map:
         answer = _replace_ref_tokens(answer, ref_map)
 
-    # Save to file
+    filename = _write_result_file(query, answer)
+    return answer, filename
+
+
+def _write_result_file(query: str, answer: str) -> str:
+    """Save the final answer to a timestamped markdown file."""
     os.makedirs("results", exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"results/analysis_{timestamp}.md"
     with open(filename, "w", encoding="utf-8") as f:
-        f.write(f"# Financial Analysis Report\n\n")
+        f.write("# Financial Analysis Report\n\n")
         f.write(f"**Query**: {query}\n\n")
         f.write(f"**Generated**: {datetime.datetime.now().isoformat()}\n\n")
         f.write("---\n\n")
         f.write(answer)
-
-    return answer, filename
+    return filename

@@ -102,8 +102,8 @@ by breaking the user's query into a sequence of steps. Each step has its own tas
 Task types:
 - extract: Pull specific facts, entities, or data points from documents.
 - reasoning: Analyze, compare, compute ratios, draw conclusions from extracted data.
-- output: Synthesize the final answer for the user.
-- qa: Quality assurance — review the answer for completeness, accuracy, and compliance.
+- output: Synthesize the final answer for the user. This is the LAST step.
+- qa: Quality assurance — review evidence/analysis for completeness, accuracy, and compliance.
 
 Planning rules:
 1. EVERY plan MUST include an `output` step and a `qa` step.
@@ -116,10 +116,11 @@ Planning rules:
 3. For a complex analytical query that needs new data, use a chain like:
      Step 1: extract — collect raw data
      Step 2: reasoning — compute comparisons, ratios, trends (optional)
-     Step 3: output — synthesize the final answer
-     Step 4: qa — review the answer
-4. For a simple factual question that needs new data, use: extract → output → qa.
-5. For questions that need no new data, use only: output → qa.
+     Step 3: qa — review evidence and analysis for completeness and accuracy
+     Step 4: output — synthesize the final answer
+4. For a simple factual question that needs new data, use: extract → qa → output.
+5. For questions that need no new data, use only: qa → output.
+6. The `output` step MUST be the LAST step, and `qa` MUST come immediately before `output`.
 
 target_scope: Conceptual sub-areas to investigate. NOT document section names — 
 the search tools find those dynamically. Use descriptive phrases.
@@ -142,19 +143,27 @@ Return ONLY a JSON object:
     },
     {
       "step": 2,
-      "task_type": "output",
-      "objective": "Synthesize the final answer",
-      "target_scope": [],
+      "task_type": "reasoning",
+      "objective": "Analyze and compare extracted data",
+      "target_scope": ["trend analysis", "ratio computation"],
       "target_docs": [],
-      "output_shape": "paragraph"
+      "output_shape": "structured_analysis"
     },
     {
       "step": 3,
       "task_type": "qa",
-      "objective": "Review the answer for completeness and accuracy",
+      "objective": "Review evidence and analysis for completeness and accuracy",
       "target_scope": [],
       "target_docs": [],
       "output_shape": "assessment_report"
+    },
+    {
+      "step": 4,
+      "task_type": "output",
+      "objective": "Synthesize the final answer for the user",
+      "target_scope": [],
+      "target_docs": [],
+      "output_shape": "table"
     }
   ]
 }"""
@@ -209,11 +218,16 @@ Produce the multi-step execution plan. Simple queries get 1 step; complex analyt
         steps.append({
             "step": 0,
             "task_type": "qa",
-            "objective": "Review the answer for completeness, accuracy, and compliance",
+            "objective": "Review evidence and analysis for completeness, accuracy, and compliance",
             "target_scope": [],
             "target_docs": [],
             "output_shape": "assessment_report",
         })
+
+    # Ensure canonical execution order: extract → reasoning → qa → output.
+    priority = {"extract": 0, "reasoning": 1, "qa": 2, "output": 3}
+    steps.sort(key=lambda s: priority.get(s.get("task_type"), 99))
+
     # Renumber steps sequentially.
     for i, s in enumerate(steps, start=1):
         s["step"] = i
